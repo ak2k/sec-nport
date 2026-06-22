@@ -30,6 +30,6 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.delenv(var, raising=False)
 
     settings = get_settings()
-    assert settings.hf_repo_id == "ak2k/sec-nport"
+    assert settings.hf_repo_id == "trader298/sec-nport"
     assert settings.sec_user_agent is None
     assert settings.log_level == "info"

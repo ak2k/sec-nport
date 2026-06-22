@@ -44,7 +44,7 @@ class Settings(BaseSettings):
         description="HuggingFace write token (only needed for upload).",
     )
     hf_repo_id: str = Field(
-        default="ak2k/sec-nport",
+        default="trader298/sec-nport",
         description="Target HuggingFace dataset repo id.",
     )
     data_dir: Path = Field(
