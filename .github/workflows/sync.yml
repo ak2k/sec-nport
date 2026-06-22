@@ -1,0 +1,115 @@
+name: Sync N-PORT
+
+on:
+  schedule:
+    # A few days into each quarter, after the SEC posts the new data set.
+    - cron: "27 7 5 1,4,7,10 *"
+  workflow_dispatch:
+    inputs:
+      quarter:
+        description: "Single quarter (e.g. 2024q1); empty = all pending"
+        required: false
+        default: ""
+      all:
+        description: "Rebuild every quarter (backfill)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "sync/**"
+      - ".github/workflows/sync.yml"
+
+concurrency:
+  group: sync-nport
+  cancel-in-progress: false
+
+jobs:
+  # ── Detect which quarters need building → matrix ──────────────────────
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      has_work: ${{ steps.detect.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r sync/requirements.txt
+      - id: detect
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+        run: |
+          if [ -n "${{ github.event.inputs.quarter }}" ]; then
+            QUARTERS='["${{ github.event.inputs.quarter }}"]'
+          elif [ "${{ github.event.inputs.all }}" = "true" ]; then
+            QUARTERS=$(python -c "import json; from sync import sec; print(json.dumps(sec.list_quarters()))")
+          else
+            QUARTERS=$(python -m sync --list-pending)
+          fi
+          echo "matrix=$QUARTERS" >> "$GITHUB_OUTPUT"
+          [ "$QUARTERS" = "[]" ] && echo "has_work=false" >> "$GITHUB_OUTPUT" || echo "has_work=true" >> "$GITHUB_OUTPUT"
+
+  # ── Convert + upload each quarter (one job per quarter) ───────────────
+  sync:
+    needs: detect
+    if: needs.detect.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3 # be polite to SEC + serialise HF commits modestly
+      matrix:
+        quarter: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    name: sync ${{ matrix.quarter }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r sync/requirements.txt
+      - name: Convert ${{ matrix.quarter }} to Parquet
+        env:
+          SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT }}
+        run: python -m sync --quarter ${{ matrix.quarter }} --no-upload
+      - name: Upload Parquet to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from sync import hf
+          repo = os.environ["HF_REPO_ID"]
+          hf.ensure_repo(repo)
+          hf.upload(repo, "data")
+          PY
+
+  # ── Regenerate the dataset card once, after all quarters land ─────────
+  card:
+    needs: [detect, sync]
+    if: needs.detect.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r sync/requirements.txt
+      - name: Write + upload dataset card
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from sync import card, hf
+          repo = os.environ["HF_REPO_ID"]
+          card.write_card(repo, "data")  # tables from the constant list
+          hf.ensure_repo(repo)
+          hf.upload(repo, "data")
+          PY
