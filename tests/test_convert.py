@@ -5,42 +5,75 @@ from __future__ import annotations
 import datetime
 import json
 import zipfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+import duckdb
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-duckdb = pytest.importorskip("duckdb")
+from sec_nport import convert
 
-from sync import convert  # noqa: E402  (import follows the duckdb skip guard)
+# Unit-testing the internal type mapping reaches into these private helpers.
+from sec_nport.convert import _Datatype, _duckdb_type  # pyright: ignore[reportPrivateUsage]
+from sec_nport.errors import ExternalServiceError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_type_mapping():
-    assert convert._duckdb_type({"base": "string", "maxLength": 20}) == "VARCHAR"
-    assert convert._duckdb_type({"base": "date (DD-MON-YYYY)"}) == "DATE"
-    # scale 0 -> integer key; scale > 0 -> exact decimal
-    assert convert._duckdb_type({"base": "NUMBER", "dataPrecision": 38, "dataScale": 0}) == "BIGINT"
-    assert convert._duckdb_type({"base": "NUMBER", "dataPrecision": 36, "dataScale": 12}) == "DECIMAL(36,12)"
-    # unknown base stays text rather than failing
-    assert convert._duckdb_type({"base": "wat"}) == "VARCHAR"
-    assert convert._duckdb_type({}) == "VARCHAR"
+    assert _duckdb_type(_Datatype(base="string")) == "VARCHAR"
+    assert _duckdb_type(_Datatype(base="date (DD-MON-YYYY)")) == "DATE"
+    assert _duckdb_type(_Datatype(base="NUMBER", dataPrecision=38, dataScale=0)) == "BIGINT"
+    assert (
+        _duckdb_type(_Datatype(base="NUMBER", dataPrecision=36, dataScale=12)) == "DECIMAL(36,12)"
+    )
+    assert _duckdb_type(_Datatype(base="wat")) == "VARCHAR"  # drift-safe fallback
 
 
-def _make_zip(path: Path):
-    meta = {
-        "tables": [
-            {
-                "url": "T.tsv",
-                "tableSchema": {
-                    "columns": [
-                        {"name": "ACCESSION_NUMBER", "datatype": {"base": "string", "maxLength": 20}},
-                        {"name": "HOLDING_ID", "datatype": {"base": "NUMBER", "dataPrecision": 38, "dataScale": 0}},
-                        {"name": "BALANCE", "datatype": {"base": "NUMBER", "dataPrecision": 36, "dataScale": 12}},
-                        {"name": "REPORT_DATE", "datatype": {"base": "date (DD-MON-YYYY)"}},
-                    ]
-                },
-            }
-        ]
-    }
+@given(
+    precision=st.integers(min_value=1, max_value=38),
+    scale=st.integers(min_value=1, max_value=12),
+)
+def test_number_with_scale_maps_to_decimal(precision: int, scale: int):
+    mapped = _duckdb_type(_Datatype(base="NUMBER", dataPrecision=precision, dataScale=scale))
+    assert mapped == f"DECIMAL({min(precision, 38)},{scale})"
+
+
+def _make_zip(path: Path, *, metadata: object | None = None) -> None:
+    meta = (
+        metadata
+        if metadata is not None
+        else {
+            "tables": [
+                {
+                    "url": "T.tsv",
+                    "tableSchema": {
+                        "columns": [
+                            {
+                                "name": "ACCESSION_NUMBER",
+                                "datatype": {"base": "string", "maxLength": 20},
+                            },
+                            {
+                                "name": "HOLDING_ID",
+                                "datatype": {"base": "NUMBER", "dataPrecision": 38, "dataScale": 0},
+                            },
+                            {
+                                "name": "BALANCE",
+                                "datatype": {
+                                    "base": "NUMBER",
+                                    "dataPrecision": 36,
+                                    "dataScale": 12,
+                                },
+                            },
+                            {"name": "REPORT_DATE", "datatype": {"base": "date (DD-MON-YYYY)"}},
+                        ]
+                    },
+                }
+            ]
+        }
+    )
     tsv = (
         "ACCESSION_NUMBER\tHOLDING_ID\tBALANCE\tREPORT_DATE\n"
         "0001-24-000001\t42\t100.500000000000\t31-JAN-2024\n"
@@ -51,20 +84,18 @@ def _make_zip(path: Path):
         zf.writestr("T.tsv", tsv)
 
 
-def test_convert_quarter_types_and_values(tmp_path):
+def test_convert_types_values_and_partitioning(tmp_path: Path):
     zip_path = tmp_path / "2024q1_nport.zip"
     _make_zip(zip_path)
     out = tmp_path / "data"
 
     results = convert.convert_quarter(zip_path, 2024, 1, out)
-    assert results == [{"table": "T", "rows": 2}]
+    assert [(r.table, r.rows) for r in results] == [("T", 2)]
 
     parquet = out / "T" / "year=2024" / "quarter=1" / "data.parquet"
-    assert parquet.exists()  # hive-partitioned path
+    assert parquet.exists()
 
     con = duckdb.connect()
-    # The file itself holds only the typed table columns; year/quarter are
-    # encoded in the path, recovered by hive-aware readers (asserted below).
     schema = {
         name: typ
         for name, typ, *_ in con.execute(
@@ -80,30 +111,40 @@ def test_convert_quarter_types_and_values(tmp_path):
 
     rows = con.execute(
         f"SELECT ACCESSION_NUMBER, HOLDING_ID, BALANCE, REPORT_DATE "
-        f"FROM read_parquet('{parquet}', hive_partitioning=false) "
-        f"ORDER BY ACCESSION_NUMBER"
+        f"FROM read_parquet('{parquet}', hive_partitioning=false) ORDER BY ACCESSION_NUMBER"
     ).fetchall()
-    # row 1: typed values, DD-MON-YYYY parsed to a real date
     assert rows[0][0] == "0001-24-000001"
     assert rows[0][1] == 42
     assert rows[0][2] == pytest.approx(100.5)
-    assert rows[0][3] == datetime.date(2024, 1, 31)
-    # row 2: empty fields became NULL
-    assert rows[1][1] is None and rows[1][2] is None and rows[1][3] is None
+    assert rows[0][3] == datetime.date(2024, 1, 31)  # DD-MON-YYYY parsed
+    assert rows[1][1] is None and rows[1][2] is None and rows[1][3] is None  # empties -> NULL
 
-    # year/quarter are recoverable from the partition path via a hive glob
     yq = con.execute(
         f"SELECT DISTINCT year, quarter FROM read_parquet('{out}/T/**/*.parquet')"
     ).fetchall()
-    assert yq == [(2024, 1)]
+    assert yq == [(2024, 1)]  # recovered from the partition path
 
 
-def test_convert_is_idempotent(tmp_path):
+def test_convert_is_idempotent(tmp_path: Path):
     zip_path = tmp_path / "2024q1_nport.zip"
     _make_zip(zip_path)
     out = tmp_path / "data"
-    convert.convert_quarter(zip_path, 2024, 1, out)
-    # re-running overwrites the same partition cleanly, no leftover temp files
-    convert.convert_quarter(zip_path, 2024, 1, out)
+    _ = convert.convert_quarter(zip_path, 2024, 1, out)
+    _ = convert.convert_quarter(zip_path, 2024, 1, out)
     part = out / "T" / "year=2024" / "quarter=1"
-    assert [p.name for p in part.iterdir()] == ["data.parquet"]
+    assert [p.name for p in part.iterdir()] == ["data.parquet"]  # no leftover temp files
+
+
+def test_malformed_metadata_raises_domain_error(tmp_path: Path):
+    zip_path = tmp_path / "2024q1_nport.zip"
+    _make_zip(zip_path, metadata={"not_tables": []})  # missing required 'tables'
+    with pytest.raises(ExternalServiceError):
+        convert.read_metadata(zip_path)
+
+
+def test_missing_metadata_file_raises_domain_error(tmp_path: Path):
+    zip_path = tmp_path / "2024q1_nport.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("T.tsv", "a\tb\n1\t2\n")
+    with pytest.raises(ExternalServiceError):
+        convert.read_metadata(zip_path)

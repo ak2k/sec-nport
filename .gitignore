@@ -1,7 +1,19 @@
+# project output
 data/
 .work/
 *.zip
+
+# python / uv
+.venv/
 __pycache__/
 *.pyc
-.venv/
+
+# tool caches
 .pytest_cache/
+.ruff_cache/
+.basedpyright/
+.hypothesis/
+.coverage
+htmlcov/
+dist/
+build/

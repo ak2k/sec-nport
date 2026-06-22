@@ -17,27 +17,44 @@ SEC quarterly ZIP  ──►  DuckDB (typed from the ZIP's CSVW schema)  ──�
 ```
 
 - **Types are derived, not hardcoded.** Each ZIP ships `nport_metadata.json`
-  (a W3C CSVW schema); `convert.py` reads it to type every column — money as
-  `DECIMAL(36,12)`, surrogate keys as `BIGINT`, dates (`DD-MON-YYYY`) as `DATE`.
-  New/renamed SEC columns are picked up automatically.
+  (a W3C CSVW schema), validated at the boundary (`convert.NportMetadata`) and
+  used to type every column — money as `DECIMAL(36,12)`, surrogate keys as
+  `BIGINT`, dates (`DD-MON-YYYY`) as `DATE`. New/renamed SEC columns are picked
+  up automatically.
 - **1:1 quarter ↔ partition.** Each input ZIP maps onto one partition per
   table, so re-running a quarter overwrites just its partition (idempotent) and
   reading a table globs across quarters with partition pruning.
 - **Incremental.** A scheduled run builds only quarters not yet on HuggingFace;
   `upload_large_folder` is content-addressed, so re-runs are cheap.
 
+## Stack
+
+Built on the [python-starter](https://github.com/ak2k/python-starter) template:
+`uv`, `ruff` + `basedpyright` strict, Pydantic v2 at boundaries, `httpx`,
+`structlog`, `typer`, domain errors (`sec_nport.errors.AppError`). See
+`AGENTS.md` for the full contract.
+
 ## Usage
 
 ```bash
-pip install -r sync/requirements.txt
+uv sync
 export SEC_USER_AGENT="sec-nport you@example.com"   # SEC fair-access policy
 export HF_TOKEN=...                                  # for upload
 export HF_REPO_ID="<user>/sec-nport"
 
-python -m sync --all                 # backfill every quarter
-python -m sync --quarter 2024q1      # one quarter
-python -m sync                       # only quarters not yet on HF
-python -m sync --quarter 2024q1 --no-upload   # convert locally, skip upload
+uv run sec-nport sync --all                # backfill every quarter
+uv run sec-nport sync --quarter 2024q1     # one quarter
+uv run sec-nport sync                      # only quarters not yet on HF
+uv run sec-nport sync --quarter 2024q1 --no-upload   # convert locally, skip upload
+uv run sec-nport list [--all]              # print quarters as JSON (CI matrix)
+```
+
+## Develop
+
+```bash
+make check    # ruff + basedpyright strict + pytest (CI runs this)
+make fix      # autofix + format, then check
+nix develop   # optional: uv + make in a pinned shell
 ```
 
 ## CI
@@ -51,10 +68,11 @@ and a `card` job regenerates the dataset card. Configure repo `vars`
 
 | Path | |
 |------|--|
-| `sync/sec.py` | discover + download SEC quarterly ZIPs (UA-gated) |
-| `sync/convert.py` | CSVW-schema-driven typed Parquet conversion |
-| `sync/hf.py` | HuggingFace upload + incremental detection |
-| `sync/card.py` | generate the dataset card (one viewer config per table) |
-| `sync/__main__.py` | orchestrator (`python -m sync`) |
+| `src/sec_nport/sec.py` | discover + download SEC quarterly ZIPs (httpx, UA-gated) |
+| `src/sec_nport/convert.py` | CSVW-schema-driven typed Parquet conversion (DuckDB) |
+| `src/sec_nport/hf.py` | HuggingFace upload + incremental detection |
+| `src/sec_nport/card.py` | generate the dataset card (one viewer config per table) |
+| `src/sec_nport/cli.py` | `sec-nport` CLI (typer) |
+| `src/sec_nport/config.py` | typed settings (pydantic-settings) |
 
 The data is U.S. Government public domain; this is an unofficial mirror.
