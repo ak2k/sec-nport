@@ -25,18 +25,20 @@ concurrency:
   group: sync-nport
   cancel-in-progress: false
 
-env:
-  # The SEC requires a contact email in the User-Agent. Keep it a SECRET so it
-  # is masked in logs and never plaintext in the repo; the repo name supplies
-  # the public identifier (and contains no "github", which the SEC's WAF blocks).
-  SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
-  HF_REPO_ID: ${{ vars.HF_REPO_ID }}
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+# NOTE: SEC_USER_AGENT / HF_TOKEN use the `secrets` context, which is NOT
+# available in a workflow-level `env:` — only per-job. So the env block is
+# repeated on each job below. The contact email is kept a secret (masked in
+# logs, never in source); github.repository supplies the public identifier and
+# contains no "github" (which the SEC's WAF blocks).
 
 jobs:
   # ── Detect which quarters need building → matrix ──────────────────────
   detect:
     runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
+      HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
       has_work: ${{ steps.detect.outputs.has_work }}
@@ -63,6 +65,10 @@ jobs:
     needs: detect
     if: needs.detect.outputs.has_work == 'true'
     runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
+      HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     strategy:
       fail-fast: false
       max-parallel: 3 # be polite to SEC + serialise HF commits modestly
@@ -96,6 +102,9 @@ jobs:
     needs: [detect, sync]
     if: needs.detect.outputs.has_work == 'true'
     runs-on: ubuntu-latest
+    env:
+      HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
