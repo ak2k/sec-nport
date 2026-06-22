@@ -163,8 +163,15 @@ def convert_quarter(
 
     results: list[TableResult] = []
     with zipfile.ZipFile(zip_path) as zf:
+        present = set(zf.namelist())
         for table in metadata.tables:
             name = _table_name(table.url)
+            # Early quarters' metadata declares tables whose TSV isn't shipped
+            # (a table simply has no data that quarter). Skip it — no partition,
+            # which hive globbing handles fine — rather than crash on read.
+            if table.url not in present:
+                log.info("convert.skip_absent_table", table=name, year=year, quarter=quarter)
+                continue
             select = ",\n        ".join(_cast_expr(c) for c in table.table_schema.columns)
             part = out_dir / name / f"year={year}" / f"quarter={quarter}"
             part.mkdir(parents=True, exist_ok=True)

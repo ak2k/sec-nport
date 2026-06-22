@@ -148,3 +148,28 @@ def test_missing_metadata_file_raises_domain_error(tmp_path: Path):
         zf.writestr("T.tsv", "a\tb\n1\t2\n")
     with pytest.raises(ExternalServiceError):
         convert.read_metadata(zip_path)
+
+
+def test_table_absent_from_zip_is_skipped(tmp_path: Path):
+    # Early quarters declare tables in metadata whose TSV isn't shipped.
+    meta = {
+        "tables": [
+            {
+                "url": "T.tsv",
+                "tableSchema": {"columns": [{"name": "A", "datatype": {"base": "string"}}]},
+            },
+            {
+                "url": "GONE.tsv",
+                "tableSchema": {"columns": [{"name": "A", "datatype": {"base": "string"}}]},
+            },
+        ]
+    }
+    zip_path = tmp_path / "2019q4_nport.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("nport_metadata.json", json.dumps(meta))
+        zf.writestr("T.tsv", "A\nx\n")  # GONE.tsv intentionally absent
+    out = tmp_path / "data"
+
+    results = convert.convert_quarter(zip_path, 2019, 4, out)
+    assert [r.table for r in results] == ["T"]  # GONE skipped, no crash
+    assert not (out / "GONE").exists()

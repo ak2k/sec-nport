@@ -9,6 +9,7 @@ never leak to callers.
 from __future__ import annotations
 
 import re
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import httpx
@@ -30,17 +31,33 @@ _QUARTER_RE = re.compile(r"(\d{4}q[1-4])_nport\.zip")
 _TIMEOUT = httpx.Timeout(60.0, read=600.0)
 
 
+def _service_error(what: str, exc: httpx.HTTPError) -> ExternalServiceError:
+    """Wrap an httpx error, adding UA guidance on the SEC's WAF 403."""
+    hint = ""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == HTTPStatus.FORBIDDEN:
+        hint = (
+            " (403 — the SEC's fair-access WAF rejects a User-Agent without a "
+            "contact email or one containing 'github'; check SEC_USER_AGENT)"
+        )
+    return ExternalServiceError(f"{what}: {exc}{hint}")
+
+
 def make_client(user_agent: str | None) -> httpx.Client:
     """Build an httpx client carrying the SEC-required User-Agent.
 
+    The SEC fair-access WAF requires a contact email in the User-Agent (and, in
+    practice, rejects ones containing ``github``), so a missing email fails fast
+    here rather than as an opaque 403 mid-run.
+
     Raises:
-        InputValidationError: if ``user_agent`` is missing.
+        InputValidationError: if ``user_agent`` is missing or has no email.
 
     """
-    if not user_agent:
+    if not user_agent or "@" not in user_agent:
         raise InputValidationError(
-            "SEC_USER_AGENT is required (e.g. 'sec-nport you@example.com'); the "
-            "SEC fair-access policy rejects requests without contact info."
+            "SEC_USER_AGENT must be '<name> <contact-email>' (e.g. "
+            "'sec-nport you@example.com'); the SEC fair-access policy requires a "
+            "contact email and rejects User-Agents containing 'github'."
         )
     return httpx.Client(headers={"User-Agent": user_agent}, timeout=_TIMEOUT, follow_redirects=True)
 
@@ -56,7 +73,7 @@ def list_quarters(client: httpx.Client) -> list[str]:
         response = client.get(_DATASETS_PAGE)
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise ExternalServiceError(f"failed to list N-PORT quarters: {exc}") from exc
+        raise _service_error("failed to list N-PORT quarters", exc) from exc
     return sorted(set(_QUARTER_RE.findall(response.text)))
 
 
@@ -78,7 +95,7 @@ def download_quarter(client: httpx.Client, quarter: str, dest: Path) -> Path:
                     _ = fh.write(chunk)
     except httpx.HTTPError as exc:
         tmp.unlink(missing_ok=True)
-        raise ExternalServiceError(f"failed to download {quarter}: {exc}") from exc
+        raise _service_error(f"failed to download {quarter}", exc) from exc
     _ = tmp.replace(dest)
     log.info("download.done", quarter=quarter, mb=round(dest.stat().st_size / 1e6))
     return dest

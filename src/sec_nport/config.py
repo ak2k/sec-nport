@@ -34,7 +34,10 @@ class Settings(BaseSettings):
 
     sec_user_agent: str | None = Field(
         default=None,
-        description="User-Agent with contact info; required by the SEC fair-access policy.",
+        description=(
+            "User-Agent for SEC requests, '<name> <contact-email>'. The SEC "
+            "fair-access WAF requires a contact email and rejects 'github'."
+        ),
     )
     hf_token: str | None = Field(
         default=None,

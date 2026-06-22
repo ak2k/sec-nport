@@ -32,6 +32,19 @@ def test_make_client_sets_user_agent():
     client.close()
 
 
+def test_make_client_requires_email_in_user_agent():
+    with pytest.raises(InputValidationError):
+        _ = sec.make_client("sec-nport no-email-here")
+
+
+def test_403_error_mentions_user_agent():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="forbidden")
+
+    with _client(handler) as client, pytest.raises(ExternalServiceError, match="SEC_USER_AGENT"):
+        _ = sec.list_quarters(client)
+
+
 def test_list_quarters_parses_and_dedups_links():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

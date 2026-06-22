@@ -38,7 +38,9 @@ Built on the [python-starter](https://github.com/ak2k/python-starter) template:
 
 ```bash
 uv sync
-export SEC_USER_AGENT="sec-nport you@example.com"   # SEC fair-access policy
+# SEC fair-access policy: the User-Agent MUST contain a contact email, and the
+# SEC's WAF rejects any User-Agent containing "github".
+export SEC_USER_AGENT="sec-nport you@example.com"
 export HF_TOKEN=...                                  # for upload
 export HF_REPO_ID="<user>/sec-nport"
 
@@ -61,8 +63,15 @@ nix develop   # optional: uv + make in a pinned shell
 
 `.github/workflows/sync.yml` runs quarterly (and on dispatch): a `detect` job
 lists pending quarters, a `sync` matrix converts + uploads one quarter per job,
-and a `card` job regenerates the dataset card. Configure repo `vars`
-(`HF_REPO_ID`, `SEC_USER_AGENT`) and a `HF_TOKEN` secret.
+and a `card` job regenerates the dataset card.
+
+Configure:
+- var `HF_REPO_ID` — the target dataset, e.g. `ak2k/sec-nport`.
+- secret `SEC_CONTACT_EMAIL` — your contact email. The workflow builds the
+  User-Agent as `<owner>/<repo> <SEC_CONTACT_EMAIL>`, so the email stays a
+  secret (masked in logs, never in source) and the public repo name is the
+  identifier.
+- secret `HF_TOKEN` — HuggingFace write token.
 
 ## Layout
 

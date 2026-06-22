@@ -26,7 +26,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT }}
+  # The SEC requires a contact email in the User-Agent. Keep it a SECRET so it
+  # is masked in logs and never plaintext in the repo; the repo name supplies
+  # the public identifier (and contains no "github", which the SEC's WAF blocks).
+  SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
   HF_REPO_ID: ${{ vars.HF_REPO_ID }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
