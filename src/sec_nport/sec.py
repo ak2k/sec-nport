@@ -13,6 +13,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import httpx
+import stamina
 import structlog
 
 from sec_nport.errors import ExternalServiceError, InputValidationError
@@ -29,6 +30,33 @@ _DATASETS_PAGE = "https://www.sec.gov/data-research/sec-markets-data/form-n-port
 _FILE_URL = "https://www.sec.gov/files/dera/data/form-n-port-data-sets/{quarter}_nport.zip"
 _QUARTER_RE = re.compile(r"(\d{4}q[1-4])_nport\.zip")
 _TIMEOUT = httpx.Timeout(60.0, read=600.0)
+
+# The SEC rate-limits (429) bursts of large-file downloads and may return
+# transient 5xx; back off and retry those (but not 403/404 — a UA or path fix,
+# not a wait).
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS
+    return isinstance(exc, httpx.TransportError)
+
+
+@stamina.retry(on=_is_retryable, attempts=6, wait_initial=2.0, wait_max=120.0)
+def _get_text(client: httpx.Client, url: str) -> str:
+    response = client.get(url)
+    _ = response.raise_for_status()
+    return response.text
+
+
+@stamina.retry(on=_is_retryable, attempts=6, wait_initial=2.0, wait_max=120.0)
+def _stream_to_file(client: httpx.Client, url: str, dest: Path) -> None:
+    with client.stream("GET", url) as response:
+        _ = response.raise_for_status()
+        with dest.open("wb") as fh:  # truncates on each (re)try — clean restart
+            for chunk in response.iter_bytes(1 << 20):
+                _ = fh.write(chunk)
 
 
 def _service_error(what: str, exc: httpx.HTTPError) -> ExternalServiceError:
@@ -70,11 +98,10 @@ def list_quarters(client: httpx.Client) -> list[str]:
 
     """
     try:
-        response = client.get(_DATASETS_PAGE)
-        response.raise_for_status()
+        text = _get_text(client, _DATASETS_PAGE)
     except httpx.HTTPError as exc:
         raise _service_error("failed to list N-PORT quarters", exc) from exc
-    return sorted(set(_QUARTER_RE.findall(response.text)))
+    return sorted(set(_QUARTER_RE.findall(text)))
 
 
 def download_quarter(client: httpx.Client, quarter: str, dest: Path) -> Path:
@@ -88,11 +115,7 @@ def download_quarter(client: httpx.Client, quarter: str, dest: Path) -> Path:
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     log.info("download.start", quarter=quarter, url=url)
     try:
-        with client.stream("GET", url) as response:
-            response.raise_for_status()
-            with tmp.open("wb") as fh:
-                for chunk in response.iter_bytes(1 << 20):
-                    _ = fh.write(chunk)
+        _stream_to_file(client, url, tmp)
     except httpx.HTTPError as exc:
         tmp.unlink(missing_ok=True)
         raise _service_error(f"failed to download {quarter}", exc) from exc

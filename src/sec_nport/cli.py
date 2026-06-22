@@ -21,6 +21,8 @@ from sec_nport.config import Settings, get_settings
 from sec_nport.log import configure
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from structlog.stdlib import BoundLogger
 
 log: BoundLogger = structlog.get_logger("sec_nport")  # pyright: ignore[reportAny]
@@ -31,6 +33,15 @@ app = typer.Typer(add_completion=False, help="Sync SEC Form N-PORT to a HuggingF
 def _pending(settings: Settings, available: list[str]) -> list[str]:
     done = hf.existing_quarters(settings.hf_repo_id, settings.hf_token)
     return [q for q in available if q not in done]
+
+
+def _locally_done(data_dir: Path, quarter: str) -> bool:
+    """True if this quarter's output already exists locally (resume guard).
+
+    SUBMISSION is present in every quarter, so its partition is the marker.
+    """
+    year, qtr = sec.quarter_parts(quarter)
+    return (data_dir / "SUBMISSION" / f"year={year}" / f"quarter={qtr}" / "data.parquet").exists()
 
 
 @app.command()
@@ -57,6 +68,9 @@ def sync(
 
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     for q in quarters:
+        if _locally_done(settings.data_dir, q):
+            log.info("sync.skip_done", quarter=q)
+            continue
         year, qtr = sec.quarter_parts(q)
         zip_path = settings.work_dir / f"{q}_nport.zip"
         _ = sec.download_quarter(client, q, zip_path)
@@ -64,7 +78,7 @@ def sync(
             zip_path, year, qtr, settings.data_dir, memory_limit=settings.memory_limit
         )
         zip_path.unlink(missing_ok=True)
-        time.sleep(1)  # SEC fair-access courtesy
+        time.sleep(3)  # SEC fair-access courtesy (429-prone on large files)
 
     if not no_upload:
         hf.ensure_repo(settings.hf_repo_id, settings.hf_token)

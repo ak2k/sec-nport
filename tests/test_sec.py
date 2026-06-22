@@ -74,6 +74,22 @@ def test_download_quarter_writes_file(tmp_path: Path):
     assert dest.read_bytes() == b"ZIPDATA"
 
 
+def test_download_retries_on_429_then_succeeds(tmp_path: Path):
+    attempts = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(429)  # rate-limited once, then OK
+        return httpx.Response(200, content=b"OK")
+
+    dest = tmp_path / "2024q1_nport.zip"
+    with _client(handler) as client:
+        _ = sec.download_quarter(client, "2024q1", dest)
+    assert attempts["n"] == 2
+    assert dest.read_bytes() == b"OK"
+
+
 def test_download_wraps_error_and_cleans_temp(tmp_path: Path):
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(404)
