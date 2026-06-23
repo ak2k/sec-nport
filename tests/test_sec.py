@@ -103,3 +103,65 @@ def test_download_wraps_error_and_cleans_temp(tmp_path: Path):
 
 def test_quarter_parts():
     assert sec.quarter_parts("2024q1") == (2024, 1)
+
+
+def test_head_quarter_parses_fingerprint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "HEAD"
+        return httpx.Response(
+            200,
+            headers={"Last-Modified": "Wed, 10 Jul 2024 12:00:00 GMT", "Content-Length": "12345"},
+        )
+
+    with _client(handler) as client:
+        fp = sec.head_quarter(client, "2024q1")
+    assert fp.last_modified == "Wed, 10 Jul 2024 12:00:00 GMT"
+    assert fp.content_length == 12345
+
+
+def test_head_quarter_missing_headers_raises():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)  # no Last-Modified / Content-Length
+
+    with (
+        _client(handler) as client,
+        pytest.raises(ExternalServiceError, match="cannot fingerprint"),
+    ):
+        _ = sec.head_quarter(client, "2024q1")
+
+
+def test_head_quarter_wraps_http_error():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    with _client(handler) as client, pytest.raises(ExternalServiceError):
+        _ = sec.head_quarter(client, "2024q1")
+
+
+def test_head_quarter_missing_content_length_raises():
+    # Last-Modified present, Content-Length absent (e.g. chunked transfer): isolates
+    # the `content_length is None` branch from the missing-Last-Modified one.
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Last-Modified": "Wed, 10 Jul 2024 12:00:00 GMT"})
+
+    with (
+        _client(handler) as client,
+        pytest.raises(ExternalServiceError, match="cannot fingerprint"),
+    ):
+        _ = sec.head_quarter(client, "2024q1")
+
+
+def test_head_quarter_non_numeric_content_length_raises():
+    # A non-numeric Content-Length must fail loud, not crash in int() — covers the
+    # `not content_length.isdigit()` guard.
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Last-Modified": "Wed, 10 Jul 2024 12:00:00 GMT", "Content-Length": "soon"},
+        )
+
+    with (
+        _client(handler) as client,
+        pytest.raises(ExternalServiceError, match="cannot fingerprint"),
+    ):
+        _ = sec.head_quarter(client, "2024q1")

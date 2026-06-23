@@ -10,6 +10,7 @@ Demonstrates:
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 import structlog
@@ -50,5 +51,8 @@ def configure(level: LogLevel = "info", json: bool = False) -> None:
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(LEVELS[level]),
+        # Logs go to stderr so stdout stays clean for program output — the `list`
+        # command prints the CI matrix JSON there and any log line would corrupt it.
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )

@@ -2,8 +2,10 @@ name: Sync N-PORT
 
 on:
   schedule:
-    # A few days into each quarter, after the SEC posts the new data set.
-    - cron: "27 7 5 1,4,7,10 *"
+    # Daily — the SEC posts/re-posts data on no fixed schedule, and detect is a
+    # cheap HEAD per quarter (~26/day), so we check every day rather than guess a
+    # quarterly window and risk missing a late post or a re-generation.
+    - cron: "23 9 * * *"
   workflow_dispatch:
     inputs:
       quarter:
@@ -12,6 +14,10 @@ on:
         default: ""
       all:
         description: "Rebuild every quarter (backfill)"
+        type: boolean
+        default: false
+      seed:
+        description: "Backfill source fingerprints for existing quarters, then exit (no reprocessing)"
         type: boolean
         default: false
   push:
@@ -34,6 +40,7 @@ concurrency:
 jobs:
   # ── Detect which quarters need building → matrix ──────────────────────
   detect:
+    if: ${{ github.event.inputs.seed != 'true' }}
     runs-on: ubuntu-latest
     env:
       SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
@@ -125,3 +132,23 @@ jobs:
           hf.ensure_repo(repo, token)
           hf.upload(repo, Path("data"), token)
           PY
+
+  # ── One-time: seed source fingerprints for quarters already on HF ──────
+  # Run via "Run workflow" with seed=true (or `gh workflow run sync.yml -f
+  # seed=true`) before the fingerprint detect goes live, so existing quarters
+  # aren't all seen as new. HEAD-only; no download or reprocessing.
+  seed:
+    if: ${{ github.event.inputs.seed == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: "${{ github.repository }} ${{ secrets.SEC_CONTACT_EMAIL }}"
+      HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Seed source fingerprints
+        run: uv run sec-nport seed

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import httpx
 import stamina
 import structlog
+from pydantic import BaseModel, ConfigDict
 
 from sec_nport.errors import ExternalServiceError, InputValidationError
 
@@ -59,6 +60,13 @@ def _stream_to_file(client: httpx.Client, url: str, dest: Path) -> None:
                 _ = fh.write(chunk)
 
 
+@stamina.retry(on=_is_retryable, attempts=6, wait_initial=2.0, wait_max=120.0)
+def _head(client: httpx.Client, url: str) -> httpx.Response:
+    response = client.head(url)
+    _ = response.raise_for_status()
+    return response
+
+
 def _service_error(what: str, exc: httpx.HTTPError) -> ExternalServiceError:
     """Wrap an httpx error, adding UA guidance on the SEC's WAF 403."""
     hint = ""
@@ -68,6 +76,21 @@ def _service_error(what: str, exc: httpx.HTTPError) -> ExternalServiceError:
             "contact email or one containing 'github'; check SEC_USER_AGENT)"
         )
     return ExternalServiceError(f"{what}: {exc}{hint}")
+
+
+class SourceFingerprint(BaseModel):
+    """Identity of a SEC source ZIP, used to detect re-posts.
+
+    ``(Last-Modified, Content-Length)`` from the SEC's static file server. A
+    change in either means the ZIP was re-published and the quarter needs
+    reprocessing. ``frozen`` so it compares by value (the change-detection test);
+    ``extra="forbid"`` so a drifted ``_source/<q>.json`` fails loud on read.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    last_modified: str
+    content_length: int
 
 
 def make_client(user_agent: str | None) -> httpx.Client:
@@ -122,6 +145,30 @@ def download_quarter(client: httpx.Client, quarter: str, dest: Path) -> Path:
     _ = tmp.replace(dest)
     log.info("download.done", quarter=quarter, mb=round(dest.stat().st_size / 1e6))
     return dest
+
+
+def head_quarter(client: httpx.Client, quarter: str) -> SourceFingerprint:
+    """Fingerprint ``<quarter>_nport.zip`` via an HTTP HEAD (no download).
+
+    Raises:
+        ExternalServiceError: on transport/HTTP failure, or if the response
+            omits the headers needed to form a fingerprint.
+
+    """
+    url = _FILE_URL.format(quarter=quarter)
+    try:
+        response = _head(client, url)
+    except httpx.HTTPError as exc:
+        raise _service_error(f"failed to fingerprint {quarter}", exc) from exc
+    last_modified = response.headers.get("last-modified")
+    content_length = response.headers.get("content-length")
+    if not last_modified or content_length is None or not content_length.isdigit():
+        raise ExternalServiceError(
+            f"cannot fingerprint {quarter}: HEAD response lacks Last-Modified or "
+            f"Content-Length (last-modified={last_modified!r}, "
+            f"content-length={content_length!r})"
+        )
+    return SourceFingerprint(last_modified=last_modified, content_length=int(content_length))
 
 
 def quarter_parts(quarter: str) -> tuple[int, int]:
