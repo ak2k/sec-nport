@@ -152,3 +152,16 @@ jobs:
       - run: uv sync
       - name: Seed source fingerprints
         run: uv run sec-nport seed
+
+  # GitHub disables a public repo's scheduled workflows after 60 days with no
+  # repository activity (it did on 2026-08-22). Re-enabling the workflow from
+  # its own daily run resets that clock without commits.
+  keepalive:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/sync.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
